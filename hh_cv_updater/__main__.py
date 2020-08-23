@@ -19,7 +19,8 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import (TimeoutException,
                                         StaleElementReferenceException,
-                                        NoSuchElementException)
+                                        NoSuchElementException,
+                                        ElementClickInterceptedException)
 from webdriver_manager.chrome import ChromeDriverManager
 from webdriver_manager.utils import ChromeType
 
@@ -36,6 +37,7 @@ LOGIN_FINAL_URL = urlunparse(
 )
 UPDATE_BUTTON_XPATH = "//button[@data-qa='resume-update-button']"
 UPDATE_LINK_FILTER_CLASS = "bloko-link"
+UPDATE_SPAN_INACTIVE_CLASS = "applicant-resumes-update-button_disabled"
 UPDATE_INTERVAL = 4 * 3600
 UPDATE_INTERVAL_MIN_DRIFT = 10
 UPDATE_INTERVAL_MAX_DRIFT = 60
@@ -91,27 +93,25 @@ class BrowserType(enum.Enum):
     def __str__(self):
         return self.name
 
-def locate_buttons(browser, anyclass=False):
-    return list(elem for elem in browser.find_elements_by_xpath(
-        UPDATE_BUTTON_XPATH)
-        if UPDATE_LINK_FILTER_CLASS not in elem.get_attribute("class").split()
-        or anyclass
-    )
+def has_class(elem, cls):
+    return cls in elem.get_attribute("class").split()
+
+def locate_active_buttons(browser):
+    """ Locates active update CV buttons.
+    Class filter selects only bottom links. """
+    for elem in browser.find_elements_by_xpath(UPDATE_BUTTON_XPATH):
+        if has_class(elem, UPDATE_LINK_FILTER_CLASS):
+            parent = elem.find_element_by_xpath('..')
+            if not has_class(parent, UPDATE_SPAN_INACTIVE_CLASS):
+                yield elem
 
 def buttons_disabled_condition(browser):
-    while True:
-        try:
-            for elem in locate_buttons(browser):
-                if elem.get_attribute("disabled") is None:
-                    return False
-            return True
-        except StaleElementReferenceException:
-            pass
-        except NoSuchElementException:
-            pass
+    for _ in locate_active_buttons(browser):
+        return False
+    else:
+        return True
 
-def button_wait_condition(browser):
-    return len(locate_buttons(browser, True)) > 0
+button_wait_condition = EC.presence_of_element_located((By.XPATH, UPDATE_BUTTON_XPATH))
 
 def update(browser, timeout):
     logger = logging.getLogger("UPDATE")
@@ -119,13 +119,22 @@ def update(browser, timeout):
     wait_page_to_load = WebDriverWait(browser, timeout).until(
         button_wait_condition
     )
-    update_buttons = locate_buttons(browser)
+    update_buttons = list(locate_active_buttons(browser))
     logger.info("Located %d update buttons", len(update_buttons))
     for elem in update_buttons:
         sleep(1 + 2 * random())
-        elem.click()
+        try:
+            elem.click()
+        except ElementClickInterceptedException:
+            logger.info("Click intercepted. Probably CV is already updated "
+                        "and button is disabled.")
         logger.debug('click!')
-    WebDriverWait(browser, timeout).until(buttons_disabled_condition)
+    WebDriverWait(browser, timeout,
+                  ignored_exceptions=(
+                    StaleElementReferenceException,
+                    NoSuchElementException
+                  )).\
+        until(buttons_disabled_condition)
     logger.info('Updated!')
 
 def login(browser):
